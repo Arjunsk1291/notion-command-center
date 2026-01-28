@@ -1,0 +1,11 @@
+{
+  "name": "notion-command-center-updater",
+  "version": "1.0.0",
+  "main": "updater.js",
+  "scripts": {
+    "start": "node updater.js"
+  },
+  "dependencies": {
+    "@notionhq/client": "^2.2.14"
+  }
+}

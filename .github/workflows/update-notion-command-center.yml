@@ -1,0 +1,24 @@
+name: Update Notion Command Center
+on:
+  schedule:
+    - cron: '0 * * * *'
+  workflow_dispatch:
+jobs:
+  update-notion:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm start
+        env:
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          NOTION_PAGE_ID: ${{ secrets.NOTION_PAGE_ID }}
+          TASKS_DATABASE_ID: ${{ secrets.TASKS_DATABASE_ID }}
+          MEETINGS_DATABASE_ID: ${{ secrets.MEETINGS_DATABASE_ID }}
+      - run: tail -20 logs/execution.log || echo "Done"
+        if: always()
