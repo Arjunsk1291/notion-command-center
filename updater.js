@@ -13,23 +13,33 @@ function formatNotionId(notionId) {
   return notionId;
 }
 
+/**
+ * HARD-CODED CONFIG — replace the placeholder strings below with your real values.
+ *
+ * SECURITY NOTE: Storing API keys and private IDs in source code is risky.
+ * Prefer environment variables, secret managers, or CI/CD protected variables for production.
+ */
 const CONFIG = {
   notion: {
-    apiKey: process.env.NOTION_API_KEY,
-    pageId: formatNotionId(process.env.NOTION_PAGE_ID),
-    tasksDbId: formatNotionId(process.env.TASKS_DATABASE_ID),
-    meetingsDbId: formatNotionId(process.env.MEETINGS_DATABASE_ID),
+    apiKey: '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',
+    pageId: formatNotionId('COMMAND-CENTER-bd748499107c4d3da98e591d343fd0ca'),
+    tasksDbId: formatNotionId('2f6af4a2488080398d2bd3cdf3b4e506'),
+    meetingsDbId: formatNotionId('63ad18c20c914a1cadc5b029dcb62118'),
   },
   giphy: {
-    apiKey: process.env.GIPHY_API_KEY,
+    apiKey: 'eBINXKePSrc5VBI9XmK0mxIowozlbSZk',
   },
 };
 
 function validateEnv() {
-  const required = ['NOTION_API_KEY', 'NOTION_PAGE_ID', 'TASKS_DATABASE_ID', 'MEETINGS_DATABASE_ID', 'GIPHY_API_KEY'];
-  const missing = required.filter(key => !process.env[key]);
-  if (missing.length > 0) throw new Error(`Missing: ${missing.join(', ')}`);
-  log('✓ Environment validated');
+  const missing = [];
+  if (!CONFIG.notion.apiKey) missing.push('NOTION_API_KEY (CONFIG.notion.apiKey)');
+  if (!CONFIG.notion.pageId) missing.push('NOTION_PAGE_ID (CONFIG.notion.pageId)');
+  if (!CONFIG.notion.tasksDbId) missing.push('TASKS_DATABASE_ID (CONFIG.notion.tasksDbId)');
+  if (!CONFIG.notion.meetingsDbId) missing.push('MEETINGS_DATABASE_ID (CONFIG.notion.meetingsDbId)');
+  if (!CONFIG.giphy.apiKey) missing.push('GIPHY_API_KEY (CONFIG.giphy.apiKey)');
+  if (missing.length > 0) throw new Error(`Missing config values: ${missing.join(', ')}`);
+  log('✓ Configuration validated (hard-coded values present)');
 }
 
 const logsDir = path.join(__dirname, 'logs');
