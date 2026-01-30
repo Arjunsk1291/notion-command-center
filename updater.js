@@ -4,31 +4,25 @@ const fs = require('fs');
 const path = require('path');
 const { Client } = require('@notionhq/client');
 
-/* ───────── Helpers ───────── */
-
-function formatNotionId(id) {
-  const hex = id.split('-').pop();
-  if (hex && hex.length === 32) {
-    return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
-  }
-  return id;
-}
-
-/* ───────── Config ───────── */
+/* ───────── CONFIG (HARDCODED AS REQUESTED) ───────── */
 
 const CONFIG = {
   notion: {
     apiKey: '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',
-    pageId: formatNotionId('COMMAND-CENTER-bd748499107c4d3da98e591d343fd0ca'),
-    tasksDbId: formatNotionId('2f6af4a2488080398d2bd3cdf3b4e506'),
-    meetingsDbId: formatNotionId('63ad18c20c914a1cadc5b029dcb62118'),
+    pageId: 'bd748499-107c-4d3d-a98e-591d343fd0ca',
+    tasksDbId: '2f6af4a2-4880-8039-8d2b-d3cdf3b4e506',
+    meetingsDbId: '63ad18c2-0c91-4a1c-adc5-b029dcb62118',
   },
   giphy: {
     apiKey: 'eBINXKePSrc5VBI9XmK0mxIowozlbSZk',
   },
+  openrouter: {
+    apiKey: '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',
+    model: 'tngtech/deepseek-r1t2-chimera:free',
+  }
 };
 
-/* ───────── Logging ───────── */
+/* ───────── LOGGING ───────── */
 
 const logsDir = path.join(__dirname, 'logs');
 if (!fs.existsSync(logsDir)) fs.mkdirSync(logsDir, { recursive: true });
@@ -39,7 +33,7 @@ function log(msg) {
   fs.appendFileSync(path.join(logsDir, 'execution.log'), line + '\n');
 }
 
-/* ───────── GIF cache ───────── */
+/* ───────── GIPHY (NON-REPEATING) ───────── */
 
 const gifCacheFile = path.join(logsDir, 'used_gifs.json');
 
@@ -52,18 +46,15 @@ function saveGifCache(c) {
   fs.writeFileSync(gifCacheFile, JSON.stringify(c.slice(-50), null, 2));
 }
 
-/* ───────── GIPHY (fixed) ───────── */
-
 async function searchGiphyGif(query) {
   const used = loadGifCache();
   const offset = Math.floor((Date.now() / (5 * 60 * 1000)) % 50);
 
   const url =
-    `https://api.giphy.com/v1/gifs/search` +
-    `?api_key=${CONFIG.giphy.apiKey}` +
+    `https://api.giphy.com/v1/gifs/search?` +
+    `api_key=${CONFIG.giphy.apiKey}` +
     `&q=${encodeURIComponent(query)}` +
-    `&limit=25&offset=${offset}&rating=g` +
-    `&random_id=command-center-${new Date().toDateString()}`;
+    `&limit=25&offset=${offset}&rating=g`;
 
   return new Promise((resolve) => {
     https.get(url, res => {
@@ -75,11 +66,8 @@ async function searchGiphyGif(query) {
           const fresh = gifs.filter(g => !used.includes(g.id));
           const pool = fresh.length ? fresh : gifs;
           const chosen = pool[Math.floor(Math.random() * pool.length)];
-
           used.push(chosen.id);
           saveGifCache(used);
-
-          log(`🎬 GIF selected: ${chosen.id}`);
           resolve(chosen.images.original.url);
         } catch {
           resolve('https://media.giphy.com/media/3o7TKU2mVn0tDW89gI/giphy.gif');
@@ -91,19 +79,78 @@ async function searchGiphyGif(query) {
   });
 }
 
-/* ───────── Notion traversal (RESTORED) ───────── */
+/* ───────── OPENROUTER → DEEPSEEK (AI DIALOGUE) ───────── */
+
+async function generateUnhingedMalluDialogue(context) {
+  const payload = JSON.stringify({
+    model: CONFIG.openrouter.model,
+    messages: [
+      {
+        role: 'system',
+        content:
+`You are an unhinged Kerala dude with zero filter.
+You swear casually (myre, poda, patti, thendi etc — Malayalam + English mix).
+You make Malayalam movie references (Mammootty, Mohanlal, Jagathy, Suresh Gopi).
+You mock the user’s productivity like a drunk but intelligent friend.
+No moral lessons. No politeness. No repetition.
+Every response must feel new, chaotic, and funny.
+Do NOT explain yourself. Just rant.`
+      },
+      {
+        role: 'user',
+        content:
+`Current status:
+- Total tasks: ${context.totalTasks}
+- Incomplete tasks: ${context.incompleteTasks}
+- Overdue tasks: ${context.overdueTasks}
+- Upcoming meetings: ${context.upcomingMeetings}
+
+Roast and roleplay based on this.`
+      }
+    ],
+    temperature: 0.95,
+    top_p: 0.95
+  });
+
+  return new Promise((resolve, reject) => {
+    const req = https.request(
+      'https://openrouter.ai/api/v1/chat/completions',
+      {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${CONFIG.openrouter.apiKey}`,
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(payload),
+          'HTTP-Referer': 'https://github.com',
+          'X-Title': 'Notion Command Center'
+        }
+      },
+      res => {
+        let body = '';
+        res.on('data', d => body += d);
+        res.on('end', () => {
+          try {
+            const json = JSON.parse(body);
+            resolve(json.choices[0].message.content.trim());
+          } catch (e) {
+            reject(new Error('DeepSeek response parse failed'));
+          }
+        });
+      }
+    );
+
+    req.on('error', reject);
+    req.write(payload);
+    req.end();
+  });
+}
+
+/* ───────── NOTION HELPERS ───────── */
 
 async function findCalloutRecursive(notion, blockId) {
   const children = await notion.blocks.children.list({ block_id: blockId, page_size: 100 });
-
   for (const block of children.results) {
-    if (block.type === 'callout') {
-      const text = block.callout.rich_text?.[0]?.plain_text || '';
-      if (text.includes('COMMAND CENTER') || text.includes('ONLINE')) {
-        return block.id;
-      }
-    }
-
+    if (block.type === 'callout') return block.id;
     if (block.has_children) {
       const found = await findCalloutRecursive(notion, block.id);
       if (found) return found;
@@ -117,7 +164,7 @@ async function findImageInsideCallout(notion, calloutId) {
   return children.results.find(b => b.type === 'image')?.id || null;
 }
 
-/* ───────── Data fetch ───────── */
+/* ───────── DATA FETCH ───────── */
 
 async function fetchTasksData(notion) {
   const res = await notion.databases.query({ database_id: CONFIG.notion.tasksDbId });
@@ -126,14 +173,13 @@ async function fetchTasksData(notion) {
 
   for (const t of res.results) {
     total++;
-    const props = t.properties;
-    const status = Object.values(props).find(p => p.name?.toLowerCase() === 'status')
+    const status = Object.values(t.properties)
+      .find(p => p.name?.toLowerCase() === 'status')
       ?.select?.name?.toLowerCase() || '';
-
     if (status === 'done') continue;
     incomplete++;
-
-    const due = Object.values(props).find(p => p.name?.toLowerCase() === 'due')
+    const due = Object.values(t.properties)
+      .find(p => p.name?.toLowerCase() === 'due')
       ?.date?.start;
     if (due && new Date(due) < today) overdue++;
   }
@@ -146,18 +192,16 @@ async function fetchMeetingsData(notion) {
   return { upcomingMeetings: res.results.length };
 }
 
-/* ───────── Update Notion (FIXED) ───────── */
+/* ───────── UPDATE NOTION ───────── */
 
-async function updateNotionPage(notion, data, message, gifUrl) {
+async function updateNotionPage(notion, data, text, gifUrl) {
   const calloutId = await findCalloutRecursive(notion, CONFIG.notion.pageId);
-  if (!calloutId) throw new Error('❌ COMMAND CENTER callout not found');
-
   const imageId = await findImageInsideCallout(notion, calloutId);
 
   await notion.blocks.update({
     block_id: calloutId,
     callout: {
-      rich_text: [{ type: 'text', text: { content: message } }],
+      rich_text: [{ type: 'text', text: { content: text } }],
       icon: { type: 'emoji', emoji: '🤖' },
       color: 'blue_background',
     },
@@ -169,23 +213,23 @@ async function updateNotionPage(notion, data, message, gifUrl) {
       image: { external: { url: gifUrl } },
     });
   }
-
-  log('✅ Notion updated');
 }
 
-/* ───────── Main ───────── */
+/* ───────── MAIN ───────── */
 
 async function main() {
+  log('🚀 Running command center');
   const notion = new Client({ auth: CONFIG.notion.apiKey });
 
   const tasks = await fetchTasksData(notion);
   const meetings = await fetchMeetingsData(notion);
-  const data = { ...tasks, ...meetings };
+  const context = { ...tasks, ...meetings };
 
-  const msg = `🤖 COMMAND CENTER ONLINE\n\nPending: ${data.incompleteTasks}/${data.totalTasks}\nMeetings: ${data.upcomingMeetings}`;
+  const aiText = await generateUnhingedMalluDialogue(context);
   const gif = await searchGiphyGif('malayalam comedy reaction');
 
-  await updateNotionPage(notion, data, msg, gif);
+  await updateNotionPage(notion, context, aiText, gif);
+  log('✅ Updated Notion');
 }
 
 main().catch(e => {
