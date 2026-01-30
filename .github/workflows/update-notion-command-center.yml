@@ -9,10 +9,8 @@ jobs:
   update-notion:
     runs-on: ubuntu-latest
 
-    # Prevent overlapping runs if one execution is slow
     concurrency:
       group: notion-command-center
-      cancel-in-progress: true
 
     steps:
       - name: Checkout repo
@@ -30,6 +28,6 @@ jobs:
       - name: Run updater
         run: npm start
 
-      - name: Print last logs
+      - name: Print logs
         if: always()
         run: tail -20 logs/execution.log || echo "Done"
