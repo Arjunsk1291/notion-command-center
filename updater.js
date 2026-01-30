@@ -4,21 +4,17 @@ const fs = require('fs');
 const path = require('path');
 const { Client } = require('@notionhq/client');
 
-/* ────────────────────────────────
-   Helpers
-──────────────────────────────── */
+/* ───────── Helpers ───────── */
 
-function formatNotionId(notionId) {
-  const hexId = notionId.split('-').pop();
-  if (hexId && hexId.length === 32) {
-    return `${hexId.slice(0,8)}-${hexId.slice(8,12)}-${hexId.slice(12,16)}-${hexId.slice(16,20)}-${hexId.slice(20,32)}`;
+function formatNotionId(id) {
+  const hex = id.split('-').pop();
+  if (hex && hex.length === 32) {
+    return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
   }
-  return notionId;
+  return id;
 }
 
-/* ────────────────────────────────
-   Config
-──────────────────────────────── */
+/* ───────── Config ───────── */
 
 const CONFIG = {
   notion: {
@@ -32,14 +28,10 @@ const CONFIG = {
   },
 };
 
-/* ────────────────────────────────
-   Logging + storage
-──────────────────────────────── */
+/* ───────── Logging ───────── */
 
 const logsDir = path.join(__dirname, 'logs');
 if (!fs.existsSync(logsDir)) fs.mkdirSync(logsDir, { recursive: true });
-
-const gifCacheFile = path.join(logsDir, 'used_gifs.json');
 
 function log(msg) {
   const line = `[${new Date().toISOString()}] ${msg}`;
@@ -47,51 +39,39 @@ function log(msg) {
   fs.appendFileSync(path.join(logsDir, 'execution.log'), line + '\n');
 }
 
-function logError(msg) {
-  log(`❌ ${msg}`);
-}
+/* ───────── GIF cache ───────── */
+
+const gifCacheFile = path.join(logsDir, 'used_gifs.json');
 
 function loadGifCache() {
-  try {
-    return JSON.parse(fs.readFileSync(gifCacheFile, 'utf8'));
-  } catch {
-    return [];
-  }
+  try { return JSON.parse(fs.readFileSync(gifCacheFile)); }
+  catch { return []; }
 }
 
-function saveGifCache(cache) {
-  fs.writeFileSync(gifCacheFile, JSON.stringify(cache.slice(-50), null, 2));
+function saveGifCache(c) {
+  fs.writeFileSync(gifCacheFile, JSON.stringify(c.slice(-50), null, 2));
 }
 
-/* ────────────────────────────────
-   GIPHY — non-repeating retrieval
-──────────────────────────────── */
+/* ───────── GIPHY (fixed) ───────── */
 
 async function searchGiphyGif(query) {
   const used = loadGifCache();
-
-  // rotate search window every 5 minutes
   const offset = Math.floor((Date.now() / (5 * 60 * 1000)) % 50);
 
   const url =
     `https://api.giphy.com/v1/gifs/search` +
     `?api_key=${CONFIG.giphy.apiKey}` +
     `&q=${encodeURIComponent(query)}` +
-    `&limit=25` +
-    `&offset=${offset}` +
-    `&rating=g` +
-    `&lang=en` +
+    `&limit=25&offset=${offset}&rating=g` +
     `&random_id=command-center-${new Date().toDateString()}`;
 
   return new Promise((resolve) => {
     https.get(url, res => {
       let body = '';
-      res.on('data', c => (body += c));
+      res.on('data', d => body += d);
       res.on('end', () => {
         try {
           const gifs = JSON.parse(body).data || [];
-          if (!gifs.length) throw new Error('Empty');
-
           const fresh = gifs.filter(g => !used.includes(g.id));
           const pool = fresh.length ? fresh : gifs;
           const chosen = pool[Math.floor(Math.random() * pool.length)];
@@ -99,7 +79,7 @@ async function searchGiphyGif(query) {
           used.push(chosen.id);
           saveGifCache(used);
 
-          log(`✓ GIF chosen: ${chosen.id} (offset=${offset})`);
+          log(`🎬 GIF selected: ${chosen.id}`);
           resolve(chosen.images.original.url);
         } catch {
           resolve('https://media.giphy.com/media/3o7TKU2mVn0tDW89gI/giphy.gif');
@@ -111,140 +91,104 @@ async function searchGiphyGif(query) {
   });
 }
 
-/* ────────────────────────────────
-   Notion data fetch
-──────────────────────────────── */
+/* ───────── Notion traversal (RESTORED) ───────── */
+
+async function findCalloutRecursive(notion, blockId) {
+  const children = await notion.blocks.children.list({ block_id: blockId, page_size: 100 });
+
+  for (const block of children.results) {
+    if (block.type === 'callout') {
+      const text = block.callout.rich_text?.[0]?.plain_text || '';
+      if (text.includes('COMMAND CENTER') || text.includes('ONLINE')) {
+        return block.id;
+      }
+    }
+
+    if (block.has_children) {
+      const found = await findCalloutRecursive(notion, block.id);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+async function findImageInsideCallout(notion, calloutId) {
+  const children = await notion.blocks.children.list({ block_id: calloutId, page_size: 100 });
+  return children.results.find(b => b.type === 'image')?.id || null;
+}
+
+/* ───────── Data fetch ───────── */
 
 async function fetchTasksData(notion) {
   const res = await notion.databases.query({ database_id: CONFIG.notion.tasksDbId });
+  let total = 0, incomplete = 0, overdue = 0;
   const today = new Date(); today.setHours(0,0,0,0);
 
-  let total = 0, incomplete = 0, overdue = 0;
-  const priority = { high: 0, medium: 0, low: 0 };
-
-  for (const task of res.results) {
+  for (const t of res.results) {
     total++;
-    const props = task.properties;
+    const props = t.properties;
+    const status = Object.values(props).find(p => p.name?.toLowerCase() === 'status')
+      ?.select?.name?.toLowerCase() || '';
 
-    const status =
-      Object.values(props).find(p => p.name?.toLowerCase() === 'status')
-        ?.select?.name?.toLowerCase() || '';
-
-    if (status === 'done' || status === 'completed') continue;
+    if (status === 'done') continue;
     incomplete++;
 
-    const due =
-      Object.values(props).find(p => p.name?.toLowerCase() === 'due')
-        ?.date?.start;
-
+    const due = Object.values(props).find(p => p.name?.toLowerCase() === 'due')
+      ?.date?.start;
     if (due && new Date(due) < today) overdue++;
-
-    const pr =
-      Object.values(props).find(p => p.name?.toLowerCase() === 'priority')
-        ?.select?.name?.toLowerCase() || '';
-
-    if (pr.includes('high')) priority.high++;
-    else if (pr.includes('medium')) priority.medium++;
-    else if (pr.includes('low')) priority.low++;
   }
 
-  return { totalTasks: total, incompleteTasks: incomplete, overdueTasks: overdue, priorityBreakdown: priority };
+  return { totalTasks: total, incompleteTasks: incomplete, overdueTasks: overdue };
 }
 
 async function fetchMeetingsData(notion) {
-  const now = new Date();
-  const nextWeek = new Date(now.getTime() + 7 * 86400000);
-
-  const res = await notion.databases.query({
-    database_id: CONFIG.notion.meetingsDbId,
-    filter: {
-      and: [
-        { property: 'Date', date: { on_or_after: now.toISOString().split('T')[0] } },
-        { property: 'Date', date: { before: nextWeek.toISOString().split('T')[0] } },
-      ],
-    },
-  });
-
+  const res = await notion.databases.query({ database_id: CONFIG.notion.meetingsDbId });
   return { upcomingMeetings: res.results.length };
 }
 
-/* ────────────────────────────────
-   Messaging
-──────────────────────────────── */
+/* ───────── Update Notion (FIXED) ───────── */
 
-function getGifSearchQuery(d) {
-  if (d.incompleteTasks === 0 && d.overdueTasks === 0)
-    return 'malayalam comedy celebration funny dance';
-  if (d.overdueTasks > 0)
-    return 'malayalam panic shock funny reaction';
-  if (d.incompleteTasks > 10 || d.priorityBreakdown.high > 3)
-    return 'malayalam work stress funny';
-  if (d.incompleteTasks > 5)
-    return 'malayalam busy schedule comedy';
-  return 'malayalam chill relax funny';
-}
+async function updateNotionPage(notion, data, message, gifUrl) {
+  const calloutId = await findCalloutRecursive(notion, CONFIG.notion.pageId);
+  if (!calloutId) throw new Error('❌ COMMAND CENTER callout not found');
 
-function generateMessage(d) {
-  if (d.incompleteTasks === 0 && d.overdueTasks === 0)
-    return `All clear. Collector-level efficiency. Rare sight.`;
-  if (d.overdueTasks > 0)
-    return `Overdue tasks detected. This is not a drill.`;
-  if (d.incompleteTasks > 5)
-    return `Tasks piling up. Plot thickens.`;
-  return `Manageable chaos. Don't escalate it.`;
-}
-
-/* ────────────────────────────────
-   Notion update
-──────────────────────────────── */
-
-async function updateNotionPage(notion, data, msg, gif) {
-  const blocks = await notion.blocks.children.list({ block_id: CONFIG.notion.pageId });
-  const callout = blocks.results.find(b => b.type === 'callout');
-  if (!callout) throw new Error('Callout not found');
+  const imageId = await findImageInsideCallout(notion, calloutId);
 
   await notion.blocks.update({
-    block_id: callout.id,
+    block_id: calloutId,
     callout: {
-      rich_text: [{ type: 'text', text: { content: msg } }],
+      rich_text: [{ type: 'text', text: { content: message } }],
       icon: { type: 'emoji', emoji: '🤖' },
       color: 'blue_background',
     },
   });
 
-  const img = blocks.results.find(b => b.type === 'image');
-  if (img) {
+  if (imageId) {
     await notion.blocks.update({
-      block_id: img.id,
-      image: { external: { url: gif } },
+      block_id: imageId,
+      image: { external: { url: gifUrl } },
     });
   }
+
+  log('✅ Notion updated');
 }
 
-/* ────────────────────────────────
-   Main
-──────────────────────────────── */
+/* ───────── Main ───────── */
 
 async function main() {
-  try {
-    log('🚀 Running command center update');
-    const notion = new Client({ auth: CONFIG.notion.apiKey });
+  const notion = new Client({ auth: CONFIG.notion.apiKey });
 
-    const tasks = await fetchTasksData(notion);
-    const meetings = await fetchMeetingsData(notion);
-    const data = { ...tasks, ...meetings };
+  const tasks = await fetchTasksData(notion);
+  const meetings = await fetchMeetingsData(notion);
+  const data = { ...tasks, ...meetings };
 
-    const msg = generateMessage(data);
-    const gif = await searchGiphyGif(getGifSearchQuery(data));
+  const msg = `🤖 COMMAND CENTER ONLINE\n\nPending: ${data.incompleteTasks}/${data.totalTasks}\nMeetings: ${data.upcomingMeetings}`;
+  const gif = await searchGiphyGif('malayalam comedy reaction');
 
-    await updateNotionPage(notion, data, msg, gif);
-
-    log('✅ Update complete');
-    process.exit(0);
-  } catch (e) {
-    logError(e.message);
-    process.exit(1);
-  }
+  await updateNotionPage(notion, data, msg, gif);
 }
 
-main();
+main().catch(e => {
+  log(`❌ ${e.message}`);
+  process.exit(1);
+});
